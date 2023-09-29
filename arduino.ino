@@ -1,9 +1,8 @@
+#include <max6675.h>
 #include <ArduinoWebsockets.h>
 #include <ESP8266WiFi.h>
 #include <AccelStepper.h>
 #include <ArduinoJson.h>
-#include <OneWire.h>
-#include <DallasTemperature.h>
 
 const char* ssid = "Thecla en Rene-Router-2G";
 const char* password = "Billendans1";
@@ -11,8 +10,8 @@ const char* websockets_server = "wss://www.weteling.com/websocket";
 
 #define HALFSTEP 8
 
-OneWire oneWire(D6);
-DallasTemperature sensors(&oneWire);
+// Thermocouple* thermocouple;
+MAX6675 thermocouple(D6, D7, D8);
 
 // Motor pin definitions
 #define motorPin1  D1     // IN1 on the ULN2003 driver 1
@@ -20,42 +19,55 @@ DallasTemperature sensors(&oneWire);
 #define motorPin3  D3     // IN3 on the ULN2003 driver 1
 #define motorPin4  D4     // IN4 on the ULN2003 driver 1
 
+// button pin
+#define BUTTON_PIN D0
+int switchState = 0;
+
 // Initialize with pin sequence IN1-IN3-IN2-IN4 for using the AccelStepper with 28BYJ-48
 AccelStepper stepper(HALFSTEP, motorPin1, motorPin3, motorPin2, motorPin4);
 
 using namespace websockets;
 WebsocketsClient client;
 
+int minPos = 0;
+void findMinPosition() {
+  if (minPos != 0) {
+    return;
+  }
+  if (digitalRead(BUTTON_PIN) == HIGH) {
+    Serial.println("Min Position found");
+    minPos = stepper.currentPosition();
+    stepper.stop();
+    stepper.setAcceleration(500.0);
+    stepper.setSpeed(1000);
+    return;
+  }
+  stepper.moveTo(stepper.currentPosition() - 100);
+}
+
 void updatePosition(int targetPos) {
+  targetPos = targetPos + minPos;
   if (targetPos != stepper.currentPosition()) {
+    Serial.printf("updatePosition moveto %d\n", targetPos);
     stepper.moveTo(targetPos);
   }
 }
 
 void onMessageCallback(WebsocketsMessage message) {
-  //  Serial.println(message.data());
-
   DynamicJsonDocument doc(1024);
   deserializeJson(doc, message.data());
   if (doc["message"]["state"]) {
     serializeJson(doc["message"]["state"], Serial);
     Serial.println();
-    if (doc["message"]["state"]["targetPos"]) {
-      updatePosition(doc["message"]["state"]["targetPos"]);
-    }
+    updatePosition(doc["message"]["state"]["targetPos"]);
   }
-
-
-  //  Serial.println(message.data());
 }
 
 unsigned long lastMillis;
 void sendCurrentState() {
-
-  Serial.println(stepper.distanceToGo());
-
   //  only run every 5 sec
-  if (stepper.distanceToGo() != 0 || !(millis() - lastMillis >= 5 * 1000UL)) {
+  // stepper.distanceToGo() != 0 ||
+  if (minPos == 0 || !(millis() - lastMillis >= 5 * 1000UL)) {
     return;
   }
   lastMillis = millis();
@@ -66,11 +78,10 @@ void sendCurrentState() {
   DynamicJsonDocument identifierJson(1024);
 
   dataJson["action"] = "update";
-  dataJson["pos"] = stepper.currentPosition();
+  // dataJson["minPos"] = minPos;
+  dataJson["pos"] = stepper.currentPosition() + (minPos * -1);
   dataJson["dist"] = stepper.distanceToGo();
-
-  sensors.requestTemperatures();
-  dataJson["temp"] = sensors.getTempCByIndex(0);
+  dataJson["temp"] = thermocouple.readCelsius();
 
   identifierJson["channel"] = "BbqChannel";
 
@@ -85,7 +96,6 @@ void sendCurrentState() {
 
   serializeJsonPretty(doc, buffer);
   client.send(buffer);
-  //  Serial.println(buffer);
 }
 
 void onEventsCallback(WebsocketsEvent event, String data) {
@@ -104,17 +114,7 @@ void onEventsCallback(WebsocketsEvent event, String data) {
   }
 }
 
-
-void setup() {
-  //  Set the boudrate of ther serial (for the console)
-  Serial.begin(115200);
-
-  // set the stepper
-  stepper.setMaxSpeed(200.0);
-  stepper.setAcceleration(50.0);
-  stepper.setSpeed(100);
-  stepper.moveTo(0);
-
+void setupWifi() {
   // Connect to wifi
   WiFi.begin(ssid, password);
 
@@ -133,15 +133,32 @@ void setup() {
 
   // Subscribe to our channel
   client.send("{\"command\": \"subscribe\", \"identifier\": \"{\\\"channel\\\": \\\"BbqChannel\\\"}\"}");
+}
 
-  sensors.begin();
+void setup() {
+  //  Set the boudrate of ther serial (for the console)
+  Serial.begin(115200);
+
+  // set the stepper
+  stepper.setMaxSpeed(1000.0);
+  stepper.setAcceleration(10000.0);
+  stepper.setSpeed(1000);
+  stepper.moveTo(0);
+
+  // Setup wifi
+  setupWifi();
+
+  // input pin for the switch
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  // wait for max chip to stabalise
+  delay(1000);
 }
 
 void loop() {
   client.poll();
   stepper.run();
-
-  // do this as last
+  findMinPosition();
   sendCurrentState();
 }
 
